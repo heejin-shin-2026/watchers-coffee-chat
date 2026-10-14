@@ -108,48 +108,15 @@ function finalizeGroup(members: Applicant[]): MatchGroup {
 
 // 한 번의 편성 시도
 function runOnce(pool: Applicant[], rand: () => number): { groups: MatchGroup[]; waitlist: Applicant[] } {
-  // 노쇼 제외 (대기자보다 뒤)
+  // 노쇼 제외
   const active = pool.filter((a) => !a.noshow);
-  // 1순위 지역별 그룹핑 (직전 대기자 우선)
-  const byRegion = new Map<string, Applicant[]>();
-  for (const a of active) {
-    if (!byRegion.has(a.region1)) byRegion.set(a.region1, []);
-    byRegion.get(a.region1)!.push(a);
-  }
-  // 지역 인원이 4명 미만이면 2순위 희망자를 끌어오기
-  for (const [region, list] of byRegion) {
-    const need = GROUP_SIZE - (list.length % GROUP_SIZE || 0);
-    if (need > 0 && need < GROUP_SIZE) {
-      // 다른 지역에서 2순위가 이 지역인 사람 탐색
-      const donors: Applicant[] = [];
-      for (const [r2, l2] of byRegion) {
-        if (r2 === region) continue;
-        for (const c of l2) {
-          if (c.region2 === region && !donors.includes(c)) {
-            donors.push(c);
-            if (donors.length >= need) break;
-          }
-        }
-        if (donors.length >= need) break;
-      }
-      for (const d of donors) {
-        const idx = byRegion.get(d.region1)!.indexOf(d);
-        if (idx >= 0) byRegion.get(d.region1)!.splice(idx, 1);
-        list.push(d);
-      }
-    }
-  }
-
-  // 지역 그룹 안에서 탐욕 편성
+  // 전체 풀에서 탐욕 편성 (지역 일치는 pairScore 40점으로 자연 유도)
   const groups: Applicant[][] = [];
   const unassigned = new Set(active.map((a) => a.applicationId));
-  const regionLists = [...byRegion.entries()].map(([region, list]) => ({
-    region,
-    list: list.filter((a) => unassigned.has(a.applicationId)),
-  }));
 
-  const pickSeed = (list: Applicant[]): Applicant => {
-    const sorted = [...list].sort(
+  const pickSeed = (): Applicant => {
+    const remaining = active.filter((a) => unassigned.has(a.applicationId));
+    const sorted = [...remaining].sort(
       (x, y) => Number(y.prevWaitlist) - Number(x.prevWaitlist) || x.appliedAt.localeCompare(y.appliedAt)
     );
     // 앞쪽 3명 중 랜덤 1명을 시드로 (다양성 확보)
@@ -157,32 +124,27 @@ function runOnce(pool: Applicant[], rand: () => number): { groups: MatchGroup[];
     return sorted[Math.floor(rand() * k)];
   };
 
-  for (const { list } of regionLists) {
-    const local = list.filter((a) => unassigned.has(a.applicationId));
-    while (local.length >= GROUP_SIZE) {
-      const seed = pickSeed(local);
-      const idx = local.indexOf(seed);
-      local.splice(idx, 1);
-      unassigned.delete(seed.applicationId);
-      const members = [seed];
-      while (members.length < GROUP_SIZE && local.length > 0) {
-        // 시드와의 쌍 점수가 높은 순, 이전조 제약 제외
-        const scored = local
-          .filter((c) => !seed.prevPartners.has(c.personId) && !members.some((m) => m.prevPartners.has(c.personId)))
-          .map((c) => ({ c, s: members.reduce((acc, m) => acc + pairScore(m, c), 0) }))
-          .sort((a, b) => b.s - a.s || rand() - 0.5);
-        const next = scored.length > 0 ? scored[0].c : local[Math.floor(rand() * local.length)];
-        const ni = local.indexOf(next);
-        local.splice(ni, 1);
-        unassigned.delete(next.applicationId);
-        members.push(next);
-      }
-      if (members.length === GROUP_SIZE) groups.push(members);
-      else {
-        // 4명을 못 채우면 대기자로 반환
-        for (const m of members) unassigned.add(m.applicationId);
-        break;
-      }
+  while (unassigned.size >= GROUP_SIZE) {
+    const seed = pickSeed();
+    unassigned.delete(seed.applicationId);
+    const members = [seed];
+    while (members.length < GROUP_SIZE && unassigned.size > 0) {
+      const remaining = active.filter((a) => unassigned.has(a.applicationId));
+      // 시드 및 기존 멤버와의 쌍 점수가 높은 순, 이전조 제약 제외
+      const scored = remaining
+        .filter((c) => !seed.prevPartners.has(c.personId) && !members.some((m) => m.prevPartners.has(c.personId)))
+        .map((c) => ({ c, s: members.reduce((acc, m) => acc + pairScore(m, c), 0) }))
+        .sort((a, b) => b.s - a.s || rand() - 0.5);
+      const next = scored.length > 0 ? scored[0].c : remaining[Math.floor(rand() * remaining.length)];
+      unassigned.delete(next.applicationId);
+      members.push(next);
+    }
+    if (members.length === GROUP_SIZE) {
+      groups.push(members);
+    } else {
+      // 4명을 못 채우면 대기자로 반환
+      for (const m of members) unassigned.add(m.applicationId);
+      break;
     }
   }
 
